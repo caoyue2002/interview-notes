@@ -25,12 +25,14 @@
             "id": "e408e7752153aaec",
             "type": "leaf",
             "state": {
-              "type": "image",
+              "type": "markdown",
               "state": {
-                "file": "附件/Pasted image 20260706234752.png"
+                "file": "03_FreeRTOS机制.md",
+                "mode": "source",
+                "source": false
               },
-              "icon": "lucide-image",
-              "title": "Pasted image 20260706234752"
+              "icon": "lucide-file",
+              "title": "03_FreeRTOS机制"
             }
           }
         ],
@@ -125,7 +127,7 @@
         "state": {
           "type": "backlink",
           "state": {
-            "file": "00_面试总览.md",
+            "file": "03_FreeRTOS机制.md",
             "collapseAll": false,
             "extraContext": false,
             "sortOrder": "alphabetical",
@@ -181,8 +183,10 @@
   },
   "active": "e408e7752153aaec",
   "lastOpenFiles": [
-    "附件/Pasted image 20260605145120.png",
     "00_面试总览.md",
+    "03_FreeRTOS机制.md",
+    "附件/Pasted image 20260706234752.png",
+    "附件/Pasted image 20260605145120.png",
     "01_FOC.md",
     "电流环.md",
     "01 FOC.md",
