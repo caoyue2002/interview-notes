@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "09_通信协议.md",
+                "file": "00_面试总览.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "09_通信协议"
+              "title": "00_面试总览"
             }
           }
         ]
@@ -186,17 +186,20 @@
   },
   "active": "60162c4a1f32792e",
   "lastOpenFiles": [
-    "08_C、C++八股.md",
     "03_FreeRTOS机制.md",
+    "00_面试总览.md",
+    "01_FOC.md",
+    "04_Cortex-M 寄存器.md",
     "06_HardFault.md",
     "09_通信协议.md",
-    "04_Cortex-M 寄存器.md",
-    "02_imu解算.md",
-    "00_面试总览.md",
-    "附件/Pasted image 20260706234752.png",
-    "01_FOC.md",
-    "未命名.md",
     "10_RS485_IAP升级.md",
+    "08_C、C++八股.md",
+    "02_imu解算.md",
+    "附件/Pasted image 20260711160000.png",
+    "附件/Pasted image 20260711154000.png",
+    "附件/Pasted image 20260711153000.png",
+    "附件/Pasted image 20260706234752.png",
+    "未命名.md",
     "05_内存分布与启动流程.md",
     "ss.md",
     "10_IAP升级.md",
@@ -212,9 +215,6 @@
     "面试总览_链接明细_预览.png",
     "面试总览.xlsx.inspect.ndjson",
     "面试总览.xlsx",
-    "附件/Pasted image 20260706224052.png",
-    "附件/Pasted image 20260706222400.png",
-    "附件/Pasted image 20260706222453.png",
     "03_FreeRTOS机制（旧版）.md",
     "03_FreeRTOS机制（claude write）.md",
     "04_Cortex-M 寄存器（旧版）.md",
