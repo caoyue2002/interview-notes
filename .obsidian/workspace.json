@@ -4,21 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "a2c0399210d819ad",
+        "id": "e99a5b43bab90765",
         "type": "tabs",
         "children": [
           {
-            "id": "60162c4a1f32792e",
+            "id": "7015df5127e97879",
             "type": "leaf",
             "state": {
               "type": "markdown",
               "state": {
-                "file": "00_面试总览.md",
+                "file": "0B的总结/0x00_FreeRTOS概述.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "00_面试总览"
+              "title": "0x00_FreeRTOS概述"
             }
           }
         ]
@@ -53,13 +53,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "00_面试总览.md",
+                "file": "0B的总结/0x00_FreeRTOS概述.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "00_面试总览 的大纲"
+              "title": "0x00_FreeRTOS概述 的大纲"
             }
           },
           {
@@ -89,7 +89,8 @@
               "title": "书签"
             }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "horizontal",
@@ -184,22 +185,27 @@
       "bases:新建数据库": false
     }
   },
-  "active": "60162c4a1f32792e",
+  "active": "7015df5127e97879",
   "lastOpenFiles": [
+    "10_RS485_IAP升级.md",
     "03_FreeRTOS机制.md",
+    "0B的总结/0x00_FreeRTOS概述.md",
+    "附件/Pasted image 20260713015341.png",
+    "0B的总结",
+    "0x00_面试总览.md",
+    "模板/0x01_FreeRTOS概述.md",
+    "未命名.canvas",
+    "02_imu解算.md",
     "00_面试总览.md",
     "01_FOC.md",
     "04_Cortex-M 寄存器.md",
     "06_HardFault.md",
     "09_通信协议.md",
-    "10_RS485_IAP升级.md",
     "08_C、C++八股.md",
-    "02_imu解算.md",
     "附件/Pasted image 20260711160000.png",
     "附件/Pasted image 20260711154000.png",
     "附件/Pasted image 20260711153000.png",
     "附件/Pasted image 20260706234752.png",
-    "未命名.md",
     "05_内存分布与启动流程.md",
     "ss.md",
     "10_IAP升级.md",
@@ -212,20 +218,16 @@
     "面试总览_秋招概况_最终预览.png",
     "面试总览_截图预览.png",
     "面试总览_预览.png",
-    "面试总览_链接明细_预览.png",
     "面试总览.xlsx.inspect.ndjson",
     "面试总览.xlsx",
     "03_FreeRTOS机制（旧版）.md",
     "03_FreeRTOS机制（claude write）.md",
     "04_Cortex-M 寄存器（旧版）.md",
     "GDB调试原理.md",
-    "未命名.canvas",
     "电流环.md",
     "07 单片机启动流程.md",
     "求职进度.md",
-    "模板/项目复盘模板.md",
     "附件/求职经历.xlsx",
-    "模板/日记模板.md",
     "日记",
     "模板",
     "未命名.base",
