@@ -790,3 +790,452 @@ xEventListItem
 一句话总结：
 
 > **`vTaskDelay()` 只有“时间到”这一条唤醒路径；带 `xTicksToWait` 的队列/信号量 API 同时登记“事件到”和“时间到”两条路径，谁先发生就按谁解除阻塞。**
+
+---
+
+# 4 队列概述
+
+FreeRTOS 的队列不仅保存数据，还保存“因为队列空而等着读”的任务和“因为队列满而等着写”的任务。
+
+```text
+队列数据区
+    → 保存发送者拷贝进来的 item
+
+xTasksWaitingToReceive
+    → 队列空时，等待接收数据的任务
+
+xTasksWaitingToSend
+    → 队列满时，等待写入数据的任务
+```
+
+本节只讨论**普通消息队列**，不展开信号量、互斥量及队列锁定等复用机制。
+
+## 4.1 队列创建：`xQueueCreate()` 到 `xQueueGenericReset()`
+
+普通队列通常通过：
+
+```c
+QueueHandle_t xQueue = xQueueCreate( uxQueueLength, uxItemSize );
+```
+
+创建。`xQueueCreate()` 是一个宏，它会调用 `xQueueGenericCreate()`；对普通消息队列而言，主线如下：
+
+```text
+xQueueCreate(uxQueueLength, uxItemSize)
+    → xQueueGenericCreate(uxQueueLength, uxItemSize, queueQUEUE_TYPE_BASE)
+    → 分配 Queue_t 结构体 + uxQueueLength * uxItemSize 字节的数据缓冲区
+    → prvInitialiseNewQueue(...)
+    → 设置队列的固定参数
+    → xQueueGenericReset(pxNewQueue, pdTRUE)
+    → 返回 QueueHandle_t
+```
+
+动态创建时，`xQueueGenericCreate()` 一次分配连续内存：前半段是 `Queue_t`，后半段是实际保存 item 的数据缓冲区。随后把数据区首地址传给 `prvInitialiseNewQueue()`。这里不展开静态创建；静态创建的区别只是 `Queue_t` 和数据缓冲区由用户提供，后续初始化语义相同。
+
+### 4.1.1 `prvInitialiseNewQueue()`：先确定容量、item 大小和数据区首地址
+
+对于普通队列，`prvInitialiseNewQueue()` 先完成三项设置：
+
+```text
+pcHead     = 数据缓冲区首地址
+uxLength   = uxQueueLength
+uxItemSize = uxItemSize
+```
+
+然后调用：
+
+```c
+xQueueGenericReset( pxNewQueue, pdTRUE );
+```
+
+`pdTRUE` 很关键：它明确告诉 `xQueueGenericReset()`，当前对象是一个**刚创建的新队列**，还不可能存在等待发送或等待接收的任务。因此 reset 的目标是建立干净的初始状态，而不是处理已阻塞任务。
+
+### 4.1.2 `xQueueGenericReset()`：建立一个空的环形队列
+
+无论是新建队列，还是运行中调用 reset，函数首先都会把数据区相关字段恢复到“空队列”的状态：
+
+```text
+pcTail = pcHead + uxLength * uxItemSize
+    → 数据区末尾后的标记地址
+
+uxMessagesWaiting = 0
+    → 当前没有任何有效 item
+
+pcWriteTo = pcHead
+    → 下一次发送从第 0 个 item 槽位写入
+
+pcReadFrom = pcHead + (uxLength - 1) * uxItemSize
+    → 记录为最后一个槽位；第一次接收会先向后移动一个 item，正好绕回 pcHead 并读出第 0 个 item
+
+cRxLock = queueUNLOCKED
+cTxLock = queueUNLOCKED
+    → 队列不处于锁定状态
+```
+
+因此，刚创建完成时可以把读写位置理解为：
+
+```text
+pcHead                                      pcTail
+  ↓                                            ↓
+┌───────┬───────┬───────┬───────┐
+│ item0 │ item1 │ item2 │ item3 │
+└───────┴───────┴───────┴───────┘
+  ↑                                   ↑
+pcWriteTo                         pcReadFrom
+
+uxMessagesWaiting = 0
+```
+
+`pcReadFrom` 看起来位于最后一个槽位并不表示队列中有数据；它只是让接收路径的“先移动、再读取”逻辑在第一次读取时自然回到 `pcHead`。
+
+### 4.1.3 两个 `xNewQueue` 分支：为什么只处理等待发送列表
+
+字段复位后，`xQueueGenericReset()` 按 `xNewQueue` 分成两种语义：
+
+```c
+if( xNewQueue == pdFALSE )
+{
+    // reset 一个已经在运行中的队列
+}
+else
+{
+    // 初始化一个刚创建的队列
+}
+```
+
+#### 新建队列：`xNewQueue == pdTRUE`
+
+`xQueueCreate()` 走的是这个分支。函数分别调用：
+
+```c
+vListInitialise( &pxQueue->xTasksWaitingToSend );
+vListInitialise( &pxQueue->xTasksWaitingToReceive );
+```
+
+两条事件等待列表都会被初始化为空循环链表：
+
+```text
+xTasksWaitingToSend    → 空列表
+xTasksWaitingToReceive → 空列表
+```
+
+此时没有任务可能在等待该队列，所以这里只需要准备好列表容器，不需要唤醒任何任务。
+
+#### 运行中 reset：`xNewQueue == pdFALSE`
+
+这个分支面对的是已经存在的队列。reset 后 `uxMessagesWaiting = 0`，即队列一定为空。于是两个等待列表不能采用相同处理：
+
+```text
+xTasksWaitingToReceive：继续阻塞
+xTasksWaitingToSend：若非空，解除其中一个任务的阻塞
+```
+
+原因直接来自 reset 后的队列状态：
+
+```text
+等待接收的任务等待的是“队列中出现数据”
+    → reset 后队列为空，条件仍不满足
+    → xTasksWaitingToReceive 中的任务必须继续等待
+
+等待发送的任务等待的是“队列中出现空位”
+    → reset 后 uxMessagesWaiting = 0，队列从满变为空
+    → 已经具备发送条件
+    → 应从 xTasksWaitingToSend 中解除一个任务的阻塞
+```
+
+源码只在 `xTasksWaitingToSend` 非空时调用一次 `xTaskRemoveFromEventList()`：
+
+```c
+if( listLIST_IS_EMPTY( &pxQueue->xTasksWaitingToSend ) == pdFALSE )
+{
+    if( xTaskRemoveFromEventList( &pxQueue->xTasksWaitingToSend ) != pdFALSE )
+    {
+        queueYIELD_IF_USING_PREEMPTION();
+    }
+}
+```
+
+它会从按优先级排列的等待发送列表中取出一个任务，将该任务从事件等待状态转回就绪状态；如果该任务优先级更高且使用抢占调度，则请求切换。这里只解除**一个**发送者，因为一次 reset 虽然清空了整个队列，但被唤醒的任务恢复运行后仍需重新检查队列并实际完成发送；后续发送、接收操作会继续按普通队列规则唤醒其他任务。
+
+> **创建队列时，两个等待列表都只是初始化为空；重置运行中队列时，接收等待者因队列仍为空而保留阻塞，发送等待者因队列已产生空位而唤醒一个。**
+
+---
+
+## 4.2 `Queue_t` / `xQUEUE` 结构
+
+内核源码中结构体历史名称为 `xQUEUE`，随后定义：
+
+```c
+typedef xQUEUE Queue_t;
+```
+
+普通队列的核心字段可简化为：
+
+```c
+typedef struct QueueDefinition
+{
+    int8_t *pcHead;       // 数据缓冲区起始地址
+    int8_t *pcWriteTo;    // 下一次写入的位置
+
+    int8_t *pcTail;       // 数据缓冲区末尾后的标记地址
+    int8_t *pcReadFrom;   // 上一次读取的位置
+
+    List_t xTasksWaitingToSend;
+    List_t xTasksWaitingToReceive;
+
+    volatile UBaseType_t uxMessagesWaiting;
+    UBaseType_t uxLength;
+    UBaseType_t uxItemSize;
+} Queue_t;
+```
+
+> [!note] 真实源码中 `pcTail`、`pcReadFrom` 位于 `u.xQueue` 内的 union 中；这里为只说明普通队列路径，省略 union 层级后直接展示它们的作用。
+
+### 4.2.1 数据缓冲区字段
+
+| 字段 | 普通队列中的作用 |
+| --- | --- |
+| `pcHead` | 队列数据缓冲区首地址。动态创建时，通常指向紧跟在 `Queue_t` 结构体后的数据区；静态创建时，指向用户提供的缓冲区。 |
+| `pcWriteTo` | 下一条发送数据应复制到的位置。写入一个 item 后向后移动 `uxItemSize` 字节，到末尾后绕回 `pcHead`。 |
+| `pcTail` | 数据区末尾后的标记地址，用来判断写指针和读指针是否需要绕回。 |
+| `pcReadFrom` | 上一次读取 item 的位置。接收时先向后移动一个 item，再从新位置复制数据；到末尾后同样绕回。 |
+| `uxLength` | 队列容量，单位是 **item 个数**，不是字节数。 |
+| `uxItemSize` | 每个 item 的字节数。普通队列发送的是值拷贝，实际缓冲区大小约为 `uxLength * uxItemSize`。 |
+| `uxMessagesWaiting` | 当前有效 item 数。`0` 表示空，等于 `uxLength` 表示满。即使读写指针绕回重合，也能靠它区分“空”和“满”。 |
+
+普通队列可以看作环形缓冲区：
+
+```text
+pcHead                                      pcTail
+  ↓                                            ↓
+┌───────┬───────┬───────┬───────┐
+│ item0 │ item1 │ item2 │ item3 │
+└───────┴───────┴───────┴───────┘
+            ↑                   ↑
+       pcReadFrom           pcWriteTo
+```
+
+### 4.2.2 两条任务等待列表
+
+| 字段 | 队列状态 | 保存的 TCB 节点 | 作用 |
+| --- | --- | --- | --- |
+| `xTasksWaitingToReceive` | 队列为空 | 等待接收的任务的 `xEventListItem` | 发送者成功写入数据后，从这里唤醒最高优先级等待接收者。 |
+| `xTasksWaitingToSend` | 队列已满 | 等待发送的任务的 `xEventListItem` | 接收者成功取走数据后，从这里唤醒最高优先级等待发送者。 |
+
+这两条列表属于**某一个具体 Queue_t 对象**，不是全局就绪列表。列表内按等待任务的优先级排序，因此资源可用时，内核优先唤醒优先级更高的等待任务。
+
+---
+
+## 4.3 `xQueueSend()`：写入数据，或因队列满而阻塞
+
+原型：
+
+```c
+BaseType_t xQueueSend(
+    QueueHandle_t xQueue,
+    const void *pvItemToQueue,
+    TickType_t xTicksToWait
+);
+```
+
+`pvItemToQueue` 是“从哪里读取待发送数据”的地址；队列会复制 `uxItemSize` 个字节到自己的数据区，不会保存该地址本身。
+
+### 4.3.1 队列未满：发送成功
+
+```text
+发送任务 S 正在运行，且 uxMessagesWaiting < uxLength
+
+1. 将 pvItemToQueue 指向的 uxItemSize 字节复制到 pcWriteTo
+2. pcWriteTo 向后移动；到 pcTail 时绕回 pcHead
+3. uxMessagesWaiting 加 1
+4. 检查 xTasksWaitingToReceive
+   - 若为空：S 继续运行
+   - 若非空：取出其中最高优先级任务 R
+5. R 的 xEventListItem 从 xTasksWaitingToReceive 移出
+6. R 的 xStateListItem 从延时列表/挂起列表移出
+7. R 的 xStateListItem 插入 pxReadyTasksLists[R优先级]
+8. 若 R 优先级高于 S 且开启抢占：请求切换，R 可立即运行
+```
+
+发送成功时，发送任务 S 本身始终在自己的就绪列表中；发生变化的是等待接收任务 R：
+
+```text
+发送前：
+R.xStateListItem → 延时列表（有限等待）或挂起列表（无限等待）
+R.xEventListItem → xTasksWaitingToReceive
+
+发送后：
+R.xStateListItem → pxReadyTasksLists[R优先级]
+R.xEventListItem → 不再属于任何事件等待列表
+```
+
+### 4.3.2 队列已满：发送任务阻塞等待空位
+
+若：
+
+```text
+uxMessagesWaiting == uxLength
+```
+
+队列没有空位。
+
+| `xTicksToWait` | `xQueueSend()` 行为 |
+| --- | --- |
+| `0` | 不阻塞，立即返回失败。 |
+| 正数 | 当前发送任务 S 阻塞，最多等待指定 tick 数。 |
+| `portMAX_DELAY`（配置允许无限等待） | S 持续等待，直到其他任务接收数据释放空位。 |
+
+以有限等待为例，S 的两个 TCB 节点变化为：
+
+```text
+阻塞前：
+S.xStateListItem → pxReadyTasksLists[S优先级]
+S.xEventListItem → 不属于任何事件等待列表
+
+调用 xQueueSend() 发现队列满：
+1. S.xStateListItem 从就绪列表移出
+2. S.xStateListItem 以“当前 tick + xTicksToWait”为 xItemValue
+   插入 pxDelayedTaskList 或 pxOverflowDelayedTaskList
+3. S.xEventListItem 插入 xTasksWaitingToSend
+4. S 进入阻塞态，调度器选择其他就绪任务
+```
+
+```text
+阻塞后：
+S.xStateListItem → 延时列表（负责超时）
+S.xEventListItem → xTasksWaitingToSend（负责等待空位）
+```
+
+之后有任务接收一个 item，队列产生空位：
+
+```text
+1. 从 xTasksWaitingToSend 取出最高优先级任务 S
+2. S.xEventListItem 从 xTasksWaitingToSend 移出
+3. S.xStateListItem 从延时列表移出
+4. S.xStateListItem 插入 pxReadyTasksLists[S优先级]
+5. S 重新获得运行机会后，再次检查队列；有空位则完成发送
+```
+
+注意：被唤醒不等于数据已经自动写入。内核只是通知 S“队列可能有空位”；S 恢复运行后会重新检查队列状态并执行发送。
+
+若超时先到：
+
+```text
+xTaskIncrementTick()
+    → S.xStateListItem 从延时列表移出
+    → S.xEventListItem 从 xTasksWaitingToSend 移出
+    → S.xStateListItem 插入就绪列表
+    → S 恢复运行后发现等待时间耗尽，xQueueSend() 返回失败
+```
+
+---
+
+## 4.4 `xQueueReceive()`：读取数据，或因队列空而阻塞
+
+原型：
+
+```c
+BaseType_t xQueueReceive(
+    QueueHandle_t xQueue,
+    void *pvBuffer,
+    TickType_t xTicksToWait
+);
+```
+
+`pvBuffer` 是接收数据的目标地址。队列从内部缓冲区复制一个 item 到该地址；读取不会返回队列内部存储区的指针。
+
+### 4.4.1 队列非空：接收成功
+
+```text
+接收任务 R 正在运行，且 uxMessagesWaiting > 0
+
+1. pcReadFrom 移到下一个 item；到 pcTail 时绕回 pcHead
+2. 从 pcReadFrom 复制 uxItemSize 字节到 pvBuffer
+3. uxMessagesWaiting 减 1
+4. 检查 xTasksWaitingToSend
+   - 若为空：R 继续运行
+   - 若非空：取出其中最高优先级任务 S
+5. S 的 xEventListItem 从 xTasksWaitingToSend 移出
+6. S 的 xStateListItem 从延时列表/挂起列表移出
+7. S 的 xStateListItem 插入 pxReadyTasksLists[S优先级]
+8. 若 S 优先级高于 R 且开启抢占：请求切换，S 可立即运行
+```
+
+接收成功时，接收任务 R 保持就绪；发生变化的是等待发送任务 S：
+
+```text
+接收前：
+S.xStateListItem → 延时列表（有限等待）或挂起列表（无限等待）
+S.xEventListItem → xTasksWaitingToSend
+
+接收后：
+S.xStateListItem → pxReadyTasksLists[S优先级]
+S.xEventListItem → 不再属于任何事件等待列表
+```
+
+### 4.4.2 队列为空：接收任务阻塞等待数据
+
+若：
+
+```text
+uxMessagesWaiting == 0
+```
+
+队列没有可接收数据。
+
+| `xTicksToWait` | `xQueueReceive()` 行为 |
+| --- | --- |
+| `0` | 不阻塞，立即返回 `errQUEUE_EMPTY`。 |
+| 正数 | 当前接收任务 R 阻塞，最多等待指定 tick 数。 |
+| `portMAX_DELAY`（配置允许无限等待） | R 持续等待，直到其他任务发送数据。 |
+
+以有限等待为例：
+
+```text
+阻塞前：
+R.xStateListItem → pxReadyTasksLists[R优先级]
+R.xEventListItem → 不属于任何事件等待列表
+
+调用 xQueueReceive() 发现队列空：
+1. R.xStateListItem 从就绪列表移出
+2. R.xStateListItem 以“当前 tick + xTicksToWait”为 xItemValue
+   插入 pxDelayedTaskList 或 pxOverflowDelayedTaskList
+3. R.xEventListItem 插入 xTasksWaitingToReceive
+4. R 进入阻塞态，调度器选择其他就绪任务
+```
+
+```text
+阻塞后：
+R.xStateListItem → 延时列表（负责超时）
+R.xEventListItem → xTasksWaitingToReceive（负责等待数据）
+```
+
+其他任务向该队列成功发送一个 item 后：
+
+```text
+1. 从 xTasksWaitingToReceive 取出最高优先级任务 R
+2. R.xEventListItem 从 xTasksWaitingToReceive 移出
+3. R.xStateListItem 从延时列表移出
+4. R.xStateListItem 插入 pxReadyTasksLists[R优先级]
+5. R 重新获得运行机会后，再次检查队列；有数据则完成接收
+```
+
+若等待时间先耗尽，则 `xTaskIncrementTick()` 同时将 R 从延时列表和 `xTasksWaitingToReceive` 移出，再将 R 放回就绪列表；R 恢复运行后返回 `errQUEUE_EMPTY`。
+
+---
+
+## 4.5 两个 API 的任务移动对照
+
+```text
+xQueueSend() 发现“满”
+    当前发送者 S：就绪列表 → 延时列表 + xTasksWaitingToSend
+    某接收者取走数据：S 从两条等待列表移除 → 就绪列表
+
+xQueueReceive() 发现“空”
+    当前接收者 R：就绪列表 → 延时列表 + xTasksWaitingToReceive
+    某发送者写入数据：R 从两条等待列表移除 → 就绪列表
+```
+
+一句话总结：
+
+> **队列的数据区解决“数据放在哪里”；`xTasksWaitingToSend/Receive` 解决“资源不可用时谁需要等”；TCB 的 `xStateListItem` 管超时和就绪状态，`xEventListItem` 管具体队列事件。**
