@@ -1026,113 +1026,165 @@ pcHead                                      pcTail
 
 ---
 
-## 4.3 `xQueueSend()`：写入数据，或因队列满而阻塞
+## 4.3 队列发送：`xQueueSend()` 到 `xQueueGenericSend()`
 
-原型：
+普通的 `xQueueSend()` 是“发送到队尾”的宏封装，最终调用：
 
 ```c
-BaseType_t xQueueSend(
-    QueueHandle_t xQueue,
-    const void *pvItemToQueue,
-    TickType_t xTicksToWait
-);
+xQueueGenericSend( xQueue, pvItemToQueue, xTicksToWait, queueSEND_TO_BACK );
 ```
 
-`pvItemToQueue` 是“从哪里读取待发送数据”的地址；队列会复制 `uxItemSize` 个字节到自己的数据区，不会保存该地址本身。
+`pvItemToQueue` 只是待发送数据的源地址。队列会复制 `uxItemSize` 个字节到自己的缓冲区，**不会保存这个指针**。
 
-### 4.3.1 队列未满：发送成功
+### 4.3.1 发送成功时，队列本身如何变化
+
+进入 `xQueueGenericSend()` 后，先在临界区判断：
 
 ```text
-发送任务 S 正在运行，且 uxMessagesWaiting < uxLength
+uxMessagesWaiting < uxLength
+```
 
+若成立，队列尚有空位，调用 `prvCopyDataToQueue()` 写入数据。对普通的 `xQueueSend()`，位置参数是 `queueSEND_TO_BACK`，执行顺序为：
+
+```text
 1. 将 pvItemToQueue 指向的 uxItemSize 字节复制到 pcWriteTo
-2. pcWriteTo 向后移动；到 pcTail 时绕回 pcHead
-3. uxMessagesWaiting 加 1
-4. 检查 xTasksWaitingToReceive
-   - 若为空：S 继续运行
-   - 若非空：取出其中最高优先级任务 R
-5. R 的 xEventListItem 从 xTasksWaitingToReceive 移出
-6. R 的 xStateListItem 从延时列表/挂起列表移出
-7. R 的 xStateListItem 插入 pxReadyTasksLists[R优先级]
-8. 若 R 优先级高于 S 且开启抢占：请求切换，R 可立即运行
+2. pcWriteTo += uxItemSize，指向下一个可写槽位
+3. 若 pcWriteTo 到达 pcTail，则回绕为 pcHead
+4. uxMessagesWaiting 加 1
 ```
 
-发送成功时，发送任务 S 本身始终在自己的就绪列表中；发生变化的是等待接收任务 R：
+例如容量为 4，当前队列有 2 个 item，发送一次后：
 
 ```text
-发送前：
-R.xStateListItem → 延时列表（有限等待）或挂起列表（无限等待）
-R.xEventListItem → xTasksWaitingToReceive
-
-发送后：
-R.xStateListItem → pxReadyTasksLists[R优先级]
-R.xEventListItem → 不再属于任何事件等待列表
+发送前：uxMessagesWaiting = 2，pcWriteTo 指向 item2
+发送后：uxMessagesWaiting = 3，pcWriteTo 指向 item3
 ```
 
-### 4.3.2 队列已满：发送任务阻塞等待空位
-
-若：
+发送任务自己没有阻塞，仍在原优先级的就绪列表中；但队列从“空”或“有数据”变为“多一个 item”后，内核会检查 `xTasksWaitingToReceive`：
 
 ```text
-uxMessagesWaiting == uxLength
+xTasksWaitingToReceive 非空
+    → 取出其中优先级最高的接收任务 R
+    → R.xEventListItem 从 xTasksWaitingToReceive 移出
+    → R.xStateListItem 从延时列表或挂起列表移出
+    → R.xStateListItem 加入 pxReadyTasksLists[R优先级]
+    → 若 R 优先级高于当前发送任务，抢占调度下请求切换
 ```
 
-队列没有空位。
+这一步只表示接收任务获得了“重新检查队列”的机会；数据仍保存在队列中，真正的取数由 R 后续恢复运行后完成。
 
-| `xTicksToWait` | `xQueueSend()` 行为 |
-| --- | --- |
-| `0` | 不阻塞，立即返回失败。 |
-| 正数 | 当前发送任务 S 阻塞，最多等待指定 tick 数。 |
-| `portMAX_DELAY`（配置允许无限等待） | S 持续等待，直到其他任务接收数据释放空位。 |
+### 4.3.2 三种写入位置
 
-以有限等待为例，S 的两个 TCB 节点变化为：
+`xQueueGenericSend()` 的 `xCopyPosition` 决定 `prvCopyDataToQueue()` 如何写入。普通队列有三种方式：
+
+| 写入方式 | 对应位置参数 | 数据写入和成员变化 |
+| --- | --- | --- |
+| 发送到队尾 | `queueSEND_TO_BACK` | 复制到 `pcWriteTo`，随后 `pcWriteTo` 向后移动并在 `pcTail` 回绕；`uxMessagesWaiting` 加 1。这是 `xQueueSend()` 的方式。 |
+| 发送到队首 | `queueSEND_TO_FRONT` | 复制到当前 `pcReadFrom`，随后 `pcReadFrom` 向前移动一个 item 槽位并在 `pcHead` 前回绕到最后一个槽位；`uxMessagesWaiting` 加 1。下一次接收先将 `pcReadFrom` 前移，因此会先取到这次插入的数据。 |
+| 覆盖写入 | `queueOVERWRITE` | 使用与“发送到队首”相同的写入位置，但只允许 `uxLength == 1`。队列原先已有 item 时，先使局部计数减 1，再在结尾加 1，因此 `uxMessagesWaiting` 保持为 1；新 item 覆盖旧 item。 |
+
+前两种方式都要求队列未满。`queueOVERWRITE` 是长度为 1 的覆盖队列专用方式，因此即使 `uxMessagesWaiting == uxLength`，也允许写入。
+
+### 4.3.3 队列已满：`xQueueGenericSend()` 的等待主线
+
+若队列已满且不是 `queueOVERWRITE`，函数根据 `xTicksToWait` 分支：
 
 ```text
-阻塞前：
-S.xStateListItem → pxReadyTasksLists[S优先级]
-S.xEventListItem → 不属于任何事件等待列表
-
-调用 xQueueSend() 发现队列满：
-1. S.xStateListItem 从就绪列表移出
-2. S.xStateListItem 以“当前 tick + xTicksToWait”为 xItemValue
-   插入 pxDelayedTaskList 或 pxOverflowDelayedTaskList
-3. S.xEventListItem 插入 xTasksWaitingToSend
-4. S 进入阻塞态，调度器选择其他就绪任务
+队列满
+    ├── xTicksToWait == 0
+    │   → 不阻塞，立即返回 errQUEUE_FULL
+    │
+    └── xTicksToWait > 0
+        → 记录本次等待的起点 TimeOut_t
+        → 暂停调度器并锁定队列
+        → xTaskCheckForTimeOut() 判断还能否继续等待
 ```
 
+首次发现队列满时，`vTaskInternalSetTimeOutState()` 将当前：
+
 ```text
-阻塞后：
+xNumOfOverflows → xTimeOut.xOverflowCount
+xTickCount      → xTimeOut.xTimeOnEntering
+```
+
+保存到 `TimeOut_t`。后续即使任务被唤醒后又抢不到空位，也会用同一个起点计算**总等待时间**，不会每次重试都重新获得完整的等待时长。
+
+若 `xTaskCheckForTimeOut()` 返回“尚未超时”，内核还会再次确认队列确实仍满；这样可以避免“刚退出临界区，其他任务已接收数据”的竞态。只有确认仍满，才调用：
+
+```c
+vTaskPlaceOnEventList( &pxQueue->xTasksWaitingToSend, xTicksToWait );
+```
+
+其中当前发送任务 S 的两个 TCB 节点迁移为：
+
+```text
+S.xEventListItem
+    → 按优先级插入 Queue_t.xTasksWaitingToSend
+    → 表示等待“队列出现空位”这个事件
+
+S.xStateListItem
+    → 先从 pxReadyTasksLists[S优先级] 移出
+    → 有限等待：按唤醒 tick 插入 pxDelayedTaskList 或 pxOverflowDelayedTaskList
+    → 无限等待：在 INCLUDE_vTaskSuspend == 1 时插入 xSuspendedTaskList
+```
+
+因此有限等待期间：
+
+```text
 S.xStateListItem → 延时列表（负责超时）
-S.xEventListItem → xTasksWaitingToSend（负责等待空位）
+S.xEventListItem → xTasksWaitingToSend（负责等空位）
 ```
 
-之后有任务接收一个 item，队列产生空位：
+真正的无限等待只有：
 
 ```text
-1. 从 xTasksWaitingToSend 取出最高优先级任务 S
-2. S.xEventListItem 从 xTasksWaitingToSend 移出
-3. S.xStateListItem 从延时列表移出
-4. S.xStateListItem 插入 pxReadyTasksLists[S优先级]
-5. S 重新获得运行机会后，再次检查队列；有空位则完成发送
+xTicksToWait == portMAX_DELAY 且 INCLUDE_vTaskSuspend == 1
 ```
 
-注意：被唤醒不等于数据已经自动写入。内核只是通知 S“队列可能有空位”；S 恢复运行后会重新检查队列状态并执行发送。
+此时 `xTaskCheckForTimeOut()` 直接判定“未超时”，`xStateListItem` 进入 `xSuspendedTaskList`，不会因为 tick 推进而被释放。若 `INCLUDE_vTaskSuspend == 0`，`portMAX_DELAY` 只是最大有限等待 tick 数，最终仍可能超时。
 
-若超时先到：
+### 4.3.4 被接收操作唤醒，或因超时返回失败
+
+其他任务成功接收一个 item 后，队列出现空位，会从 `xTasksWaitingToSend` 取出优先级最高的发送任务 S：
 
 ```text
-xTaskIncrementTick()
-    → S.xStateListItem 从延时列表移出
-    → S.xEventListItem 从 xTasksWaitingToSend 移出
-    → S.xStateListItem 插入就绪列表
-    → S 恢复运行后发现等待时间耗尽，xQueueSend() 返回失败
+S.xEventListItem：xTasksWaitingToSend → 移出
+S.xStateListItem：延时列表 / xSuspendedTaskList → pxReadyTasksLists[S优先级]
+```
+
+S 恢复运行后回到 `xQueueGenericSend()` 的循环开头，重新检查队列；确认有空位后才实际复制数据并返回 `pdPASS`。被事件唤醒不等于已经完成发送。
+
+若没有空位，`xTaskCheckForTimeOut()` 通过以下路径作出判断：
+
+```text
+1. 若启用 INCLUDE_xTaskAbortDelay，且任务延时被 vTaskAbortDelay() 中止
+   → 结束等待，函数返回“超时/结束等待”
+
+2. 若 xTicksToWait == portMAX_DELAY 且 INCLUDE_vTaskSuspend == 1
+   → 无限等待，返回“尚未超时”
+
+3. 若 xNumOfOverflows 已不同于进入等待时记录的 xOverflowCount，
+   且当前 xTickCount 又达到或超过 xTimeOnEntering
+   → 至少经过完整一圈 tick，必然超时
+
+4. 否则计算 xElapsedTime = 当前 xTickCount - 上次记录的进入 tick
+   - xElapsedTime < 剩余 xTicksToWait：扣除已等待时间，更新 TimeOut_t，继续等待
+   - xElapsedTime >= 剩余 xTicksToWait：等待耗尽，超时
+```
+
+第 3 条专门处理 tick 回绕多圈的情况，避免无符号减法再次得到较小的 `xElapsedTime`。超时由 SysTick 路径解除 S 的阻塞：
+
+```text
+S.xStateListItem：延时列表 → 就绪列表
+S.xEventListItem：xTasksWaitingToSend → 移出
+S 恢复运行 → xTaskCheckForTimeOut() 返回超时 → xQueueGenericSend() 返回 errQUEUE_FULL
 ```
 
 ---
 
-## 4.4 `xQueueReceive()`：读取数据，或因队列空而阻塞
+## 4.4 队列接收：`xQueueReceive()` 与 `xQueuePeek()`
 
-原型：
+发送路径关心“有没有空位”，接收路径关心“有没有数据”。除方向相反外，`xQueueGenericReceive()` 的等待、超时和 TCB 列表迁移与 `4.3` 的发送路径基本对称。
 
 ```c
 BaseType_t xQueueReceive(
@@ -1142,85 +1194,116 @@ BaseType_t xQueueReceive(
 );
 ```
 
-`pvBuffer` 是接收数据的目标地址。队列从内部缓冲区复制一个 item 到该地址；读取不会返回队列内部存储区的指针。
+`pvBuffer` 是接收目标地址。队列会将一个 item 的 `uxItemSize` 字节复制到这里，返回的不是内部缓冲区指针。
 
-### 4.4.1 队列非空：接收成功
+### 4.4.1 队列非空：真正接收如何改变 `Queue_t`
 
-```text
-接收任务 R 正在运行，且 uxMessagesWaiting > 0
-
-1. pcReadFrom 移到下一个 item；到 pcTail 时绕回 pcHead
-2. 从 pcReadFrom 复制 uxItemSize 字节到 pvBuffer
-3. uxMessagesWaiting 减 1
-4. 检查 xTasksWaitingToSend
-   - 若为空：R 继续运行
-   - 若非空：取出其中最高优先级任务 S
-5. S 的 xEventListItem 从 xTasksWaitingToSend 移出
-6. S 的 xStateListItem 从延时列表/挂起列表移出
-7. S 的 xStateListItem 插入 pxReadyTasksLists[S优先级]
-8. 若 S 优先级高于 R 且开启抢占：请求切换，S 可立即运行
-```
-
-接收成功时，接收任务 R 保持就绪；发生变化的是等待发送任务 S：
+`xQueueGenericReceive()` 在临界区先读取 `uxMessagesWaiting`。只要：
 
 ```text
-接收前：
-S.xStateListItem → 延时列表（有限等待）或挂起列表（无限等待）
-S.xEventListItem → xTasksWaitingToSend
-
-接收后：
-S.xStateListItem → pxReadyTasksLists[S优先级]
-S.xEventListItem → 不再属于任何事件等待列表
+uxMessagesWaiting > 0
 ```
 
-### 4.4.2 队列为空：接收任务阻塞等待数据
-
-若：
+就调用 `prvCopyDataFromQueue()`：
 
 ```text
-uxMessagesWaiting == 0
+1. pcReadFrom += uxItemSize，移动到下一个待读 item
+2. 若 pcReadFrom 到达 pcTail，则回绕为 pcHead
+3. 从新的 pcReadFrom 复制 uxItemSize 字节到 pvBuffer
+4. uxMessagesWaiting 减 1
 ```
 
-队列没有可接收数据。
+`pcReadFrom` 记录的是“上一次读取位置”，所以读取必须先移动再复制。队列创建时它被设为最后一个槽位，也正是为了让第一次移动后落到 `pcHead`。
 
-| `xTicksToWait` | `xQueueReceive()` 行为 |
-| --- | --- |
-| `0` | 不阻塞，立即返回 `errQUEUE_EMPTY`。 |
-| 正数 | 当前接收任务 R 阻塞，最多等待指定 tick 数。 |
-| `portMAX_DELAY`（配置允许无限等待） | R 持续等待，直到其他任务发送数据。 |
-
-以有限等待为例：
+取走一个 item 后，队列出现一个空位。内核随即检查 `xTasksWaitingToSend`：
 
 ```text
-阻塞前：
-R.xStateListItem → pxReadyTasksLists[R优先级]
-R.xEventListItem → 不属于任何事件等待列表
-
-调用 xQueueReceive() 发现队列空：
-1. R.xStateListItem 从就绪列表移出
-2. R.xStateListItem 以“当前 tick + xTicksToWait”为 xItemValue
-   插入 pxDelayedTaskList 或 pxOverflowDelayedTaskList
-3. R.xEventListItem 插入 xTasksWaitingToReceive
-4. R 进入阻塞态，调度器选择其他就绪任务
+xTasksWaitingToSend 非空
+    → 取出其中优先级最高的发送任务 S
+    → S.xEventListItem 从 xTasksWaitingToSend 移出
+    → S.xStateListItem 从延时列表或 xSuspendedTaskList 移出
+    → S.xStateListItem 加入 pxReadyTasksLists[S优先级]
+    → 若 S 优先级高于当前接收任务，抢占调度下请求切换
 ```
+
+被唤醒的 S 会重新进入发送函数开头检查队列；只有确认这个空位仍存在，才实际复制待发送数据。
+
+### 4.4.2 队列为空：等待数据与超时
+
+若 `uxMessagesWaiting == 0`，接收路径与“队列满时发送”的流程镜像对应：
 
 ```text
-阻塞后：
-R.xStateListItem → 延时列表（负责超时）
-R.xEventListItem → xTasksWaitingToReceive（负责等待数据）
+队列空
+    ├── xTicksToWait == 0
+    │   → 不阻塞，立即返回 errQUEUE_EMPTY
+    │
+    └── xTicksToWait > 0
+        → 首次进入时记录 TimeOut_t
+        → 暂停调度器并锁定队列
+        → xTaskCheckForTimeOut() 检查还能否等待
+        → 再次确认队列仍空后才真正阻塞
 ```
 
-其他任务向该队列成功发送一个 item 后：
+真正阻塞时调用：
+
+```c
+vTaskPlaceOnEventList( &pxQueue->xTasksWaitingToReceive, xTicksToWait );
+```
+
+当前接收任务 R 的两个节点分别进入：
 
 ```text
-1. 从 xTasksWaitingToReceive 取出最高优先级任务 R
-2. R.xEventListItem 从 xTasksWaitingToReceive 移出
-3. R.xStateListItem 从延时列表移出
-4. R.xStateListItem 插入 pxReadyTasksLists[R优先级]
-5. R 重新获得运行机会后，再次检查队列；有数据则完成接收
+R.xEventListItem
+    → xTasksWaitingToReceive
+    → 表示等待“队列中出现数据”
+
+R.xStateListItem
+    → 从 pxReadyTasksLists[R优先级] 移出
+    → 有限等待：进入 pxDelayedTaskList 或 pxOverflowDelayedTaskList
+    → xTicksToWait == portMAX_DELAY 且 INCLUDE_vTaskSuspend == 1：进入 xSuspendedTaskList
 ```
 
-若等待时间先耗尽，则 `xTaskIncrementTick()` 同时将 R 从延时列表和 `xTasksWaitingToReceive` 移出，再将 R 放回就绪列表；R 恢复运行后返回 `errQUEUE_EMPTY`。
+其他任务发送数据后，会从 `xTasksWaitingToReceive` 唤醒一个最高优先级任务：
+
+```text
+R.xEventListItem：xTasksWaitingToReceive → 移出
+R.xStateListItem：延时列表 / xSuspendedTaskList → pxReadyTasksLists[R优先级]
+R 恢复运行 → 回到 xQueueGenericReceive() 开头 → 重新确认有数据后接收
+```
+
+若有限等待的 tick 先到，SysTick 将 R 同时从延时列表和 `xTasksWaitingToReceive` 移出，并放回就绪列表。R 再次进入 `xQueueGenericReceive()` 时，`xTaskCheckForTimeOut()` 使用与发送章节相同的延时中止、`portMAX_DELAY`、经过时间与 tick 回绕判断；若队列仍空，最终返回 `errQUEUE_EMPTY`。
+
+> [!important] 即使 `xTaskCheckForTimeOut()` 已判断超时，源码仍会再检查一次队列是否为空。若刚好在超时边界已有数据进入队列，接收仍会回到循环尝试取出数据，而不是直接报告失败。
+
+### 4.4.3 `xQueuePeek()`：读取第一个 item，但不移除它
+
+`xQueuePeek()` 与 `xQueueReceive()` 的阻塞、超时、`xTasksWaitingToReceive` 迁移流程几乎相同。它们的主要区别发生在队列非空时：
+
+```text
+xQueueReceive()
+    → 前移 pcReadFrom，复制 item
+    → uxMessagesWaiting 减 1
+    → 队列产生空位，唤醒一个 xTasksWaitingToSend 中的发送者
+
+xQueuePeek()
+    → 保存原 pcReadFrom
+    → 临时前移 pcReadFrom，复制第一个 item 到 pvBuffer
+    → 将 pcReadFrom 恢复为原值
+    → uxMessagesWaiting 不变
+    → 队列没有产生空位，不唤醒发送者
+```
+
+因此 `xQueuePeek()` 看的是当前队首 item，但不消费它：下次 `xQueueReceive()` 或再次 `xQueuePeek()` 看到的仍是同一个 item。
+
+Peek 后队列仍然非空。源码会检查 `xTasksWaitingToReceive` 并可唤醒另一个等待接收的任务，因为数据仍可被其他接收者读取；而普通 `xQueueReceive()` 消费了一个 item，释放的是发送侧空位，所以检查的是 `xTasksWaitingToSend`。
+
+```text
+队列有 1 个 item，且 R1 调用 xQueuePeek()
+    → R1 得到该 item 的副本
+    → 队列仍有 1 个 item
+    → pcReadFrom 与 uxMessagesWaiting 都保持原值
+    → R2 之后调用 xQueueReceive() 仍能取走同一个 item
+```
 
 ---
 
@@ -1239,3 +1322,243 @@ xQueueReceive() 发现“空”
 一句话总结：
 
 > **队列的数据区解决“数据放在哪里”；`xTasksWaitingToSend/Receive` 解决“资源不可用时谁需要等”；TCB 的 `xStateListItem` 管超时和就绪状态，`xEventListItem` 管具体队列事件。**
+
+---
+
+# 5 互斥量：从零长度队列到优先级继承
+
+FreeRTOS 没有为信号量和互斥量再实现一套完全独立的阻塞机制。它们复用 `Queue_t`、两条事件等待列表和队列的 take/give 路径；区别在于，它们不传递业务数据，而是把队列中的“消息数量”解释为资源计数。
+
+```text
+普通队列：uxMessagesWaiting = 当前有多少个可读取 item
+
+二值信号量：uxMessagesWaiting = 0 或 1
+    0 → 没有信号，take 必须等待
+    1 → 有信号，take 可以成功
+
+互斥量：uxMessagesWaiting = 0 或 1
+    0 → 锁已被某个任务持有
+    1 → 锁空闲，可被一个任务获取
+```
+
+## 5.1 信号量本质：`uxItemSize == 0` 的长度为 1 队列
+
+以二值信号量为例，`semphr.h` 中的创建宏本质上是：
+
+```c
+xSemaphoreCreateBinary()
+    → xQueueGenericCreate( 1, 0, queueQUEUE_TYPE_BINARY_SEMAPHORE )
+```
+
+也就是：
+
+```text
+uxLength   = 1     // 最多只记录一个信号
+uxItemSize = 0     // 没有任何数据字节需要复制
+```
+
+因此创建时没有普通队列的数据缓冲区，也没有可供 `pcWriteTo`、`pcReadFrom` 移动的 item。`xQueueSemaphoreTake()` 和 `xQueueGenericSend()` 仍然在操作同一个 `Queue_t`，只是：
+
+```text
+xSemaphoreTake()
+    → xQueueSemaphoreTake()
+    → uxMessagesWaiting 从 1 减到 0
+
+xSemaphoreGive()
+    → xQueueGenericSend( ..., NULL, 0, queueSEND_TO_BACK )
+    → uxMessagesWaiting 从 0 加到 1
+```
+
+这里没有 `memcpy()`；`pvItemToQueue` 可以是 `NULL`，因为 `uxItemSize == 0`。对信号量来说，“give 一个 item”真正表达的只是“资源可用”或“事件已发生”。
+
+### 5.1.1 `Queue_t` 中哪些成员仍有意义
+
+| 成员 | 普通队列 | 二值信号量/互斥量 |
+| --- | --- | --- |
+| `uxLength` | 可容纳的 item 数 | 通常为 `1`。 |
+| `uxItemSize` | 每个 item 的字节数 | `0`，不保存业务数据。 |
+| `uxMessagesWaiting` | 当前排队数据数 | 信号量/锁的计数；二值对象只会是 `0` 或 `1`。 |
+| `pcHead`、`pcWriteTo` | 管理环形数据区 | 没有数据区，不参与数据拷贝；互斥量还复用 `pcHead` 作为类型标志。 |
+| `u.xQueue.pcTail`、`pcReadFrom` | 管理普通队列读写指针 | 对零 item 的信号量/互斥量没有普通数据区含义。 |
+| `xTasksWaitingToReceive` | 等待数据的接收任务 | 等待 take 成功的任务；对互斥量即等待获得锁的任务。 |
+| `xTasksWaitingToSend` | 等待空位的发送任务 | 对一般二值信号量可理解为等待 give 的任务；互斥量正常 give 不等待，主要关心 take 等待列表。 |
+
+`Queue_t.u` 是 union：普通队列使用 `u.xQueue` 的 `pcTail`、`pcReadFrom`；互斥量则使用同一块内存的：
+
+```c
+u.xSemaphore.xMutexHolder;        // 当前持有互斥量的 TCB
+u.xSemaphore.uxRecursiveCallCount; // 递归互斥量的重入次数
+```
+
+源码还通过：
+
+```c
+#define uxQueueType pcHead
+#define queueQUEUE_IS_MUTEX NULL
+```
+
+将 `pcHead == NULL` 作为“这是互斥量”的标记。普通队列的 `pcHead` 指向数据区，互斥量没有数据区，因此这个复用不会冲突。
+
+## 5.2 二值信号量：同步与简单互斥
+
+二值信号量常用作同步：一个执行者 give，另一个执行者 take。例如 ISR 或生产任务在事件完成后 give，等待任务 take 成功后继续运行。它也能充当简单的资源门闩：先 take 成功的任务进入临界区，其他任务在计数为 0 时阻塞，从而避免多个任务同时访问同一个外设。
+
+```text
+初始计数为 1
+
+任务 A：take 成功，计数 1 → 0，开始访问 UART
+任务 B：take 发现计数为 0，挂入 xTasksWaitingToReceive
+任务 A：give，计数 0 → 1，唤醒 B
+任务 B：再次运行后 take 成功，开始访问 UART
+```
+
+但二值信号量不记录“谁拿走了它”，也没有优先级继承：任何允许调用 give 的上下文都可以 give，它更适合事件同步。若对象明确代表“必须由持有者释放的共享资源”，应使用互斥量。
+
+> [!warning] 二值信号量能实现简单互斥，但它没有所有权校验和优先级继承。保护可能导致高优先级任务被低优先级持有者拖住的外设或临界资源时，使用互斥量更合适。
+
+## 5.3 优先级反转：为什么只靠二值信号量不够
+
+设任务优先级满足 `H > M > L`，其中 L 已经获得了保护外设的二值信号量或互斥量：
+
+```text
+1. L 获得资源，开始访问外设
+2. H 到来，尝试获得同一资源，发现资源不可用，进入阻塞态
+3. M 到来。M 不需要该资源，但优先级高于 L
+4. M 持续运行，L 无法获得 CPU 去完成外设访问并释放资源
+5. H 明明最高优先级，却间接被 M 延后
+```
+
+这就是优先级反转：H 并非直接等待 M，而是等待 L 释放资源；M 却抢占了 L，使 H 的等待时间被无关的中优先级任务拉长。二值信号量本身不会改变 L 的优先级，因此不能消除这条链路。
+
+## 5.4 互斥量：在零长度队列上加入“持有者”和优先级继承
+
+互斥量同样创建为长度 1、item 大小 0 的队列：
+
+```text
+xSemaphoreCreateMutex()
+    → xQueueCreateMutex( queueQUEUE_TYPE_MUTEX )
+    → xQueueGenericCreate( 1, 0, ... )
+    → prvInitialiseMutex()
+```
+
+`prvInitialiseMutex()` 在通用零长度队列初始化后额外执行：
+
+```text
+xMutexHolder = NULL
+uxQueueType = queueQUEUE_IS_MUTEX   // 即 pcHead = NULL
+uxRecursiveCallCount = 0
+xQueueGenericSend( mutex, NULL, 0, queueSEND_TO_BACK )
+```
+
+最后一次 send 将 `uxMessagesWaiting` 置为 1，表示新互斥量初始空闲。
+
+TCB 也只在 `configUSE_MUTEXES == 1` 时多出两个字段：
+
+```text
+uxBasePriority  → 任务创建时设置的基础优先级，不因继承而覆盖
+uxMutexesHeld   → 当前任务持有的互斥量总数
+```
+
+`uxPriority` 则始终表示当前有效优先级：它可能等于 `uxBasePriority`，也可能在继承期间更高。
+
+### 5.4.1 获取互斥量：`xSemaphoreTake()` 的源码路径
+
+`xSemaphoreTake()` 仍然展开为：
+
+```c
+xQueueSemaphoreTake( xMutex, xTicksToWait );
+```
+
+互斥量空闲时，`uxMessagesWaiting == 1`：
+
+```text
+1. xQueueSemaphoreTake() 将 uxMessagesWaiting 从 1 减为 0
+2. 检查对象类型发现它是 mutex
+3. pvTaskIncrementMutexHeldCount() 令当前任务的 uxMutexesHeld 加 1
+4. 当前任务 TCB 写入 u.xSemaphore.xMutexHolder
+5. take 返回成功
+```
+
+若互斥量已被 L 持有，`uxMessagesWaiting == 0`，高优先级任务 H 允许等待：
+
+```text
+1. xQueueSemaphoreTake() 暂停调度器并锁定该 Queue_t
+2. 调用 xTaskPriorityInherit( xMutexHolder )
+3. 再调用 vTaskPlaceOnEventList( &xTasksWaitingToReceive, xTicksToWait )
+4. H.xEventListItem → 该互斥量的 xTasksWaitingToReceive
+5. H.xStateListItem → 延时列表；无限等待时可进入 xSuspendedTaskList
+6. H 阻塞，调度器重新选择任务
+```
+
+`xTasksWaitingToReceive` 依旧按任务优先级排列，因此表头是最高优先级的等待者。
+
+### 5.4.2 `xTaskPriorityInherit()`：把持有者抬到等待者优先级
+
+在上述第 2 步，若：
+
+```text
+L.uxPriority < H.uxPriority
+```
+
+源码执行的核心动作是：
+
+```text
+1. 将 L.xEventListItem 的排序值更新为 H 的优先级对应值
+   （前提是该 item 没有被其他事件机制占用）
+
+2. 若 L 正在就绪列表中：
+   从 pxReadyTasksLists[L旧优先级] 移出 L.xStateListItem
+   L.uxPriority = H.uxPriority
+   将 L.xStateListItem 插入 pxReadyTasksLists[H优先级]
+
+3. 若 L 当前并不在就绪列表：
+   直接更新 L.uxPriority；它未来进入就绪列表时会使用新优先级
+```
+
+回到优先级反转的例子：H 等待 L 的锁后，L 临时继承 H 的优先级，因此 L 可以抢占 M，尽快运行、完成临界区并释放资源。M 不再能无限延后 H。
+
+### 5.4.3 释放互斥量：恢复资源计数，再考虑降级
+
+持有者 L 调用：
+
+```c
+xSemaphoreGive( xMutex );
+```
+
+最终仍进入 `xQueueGenericSend()`，但因为 `uxItemSize == 0` 且对象是 mutex，`prvCopyDataToQueue()` 不复制数据，而是：
+
+```text
+1. xTaskPriorityDisinherit( xMutexHolder )
+2. xMutexHolder = NULL
+3. xQueueGenericSend() 将 uxMessagesWaiting 加为 1
+4. 从 xTasksWaitingToReceive 取出最高优先级等待者 H
+5. H：事件等待列表 + 延时/挂起列表 → 就绪列表
+6. 若 H 优先级更高，请求调度
+```
+
+`xTaskPriorityDisinherit()` 总会先将 L 的 `uxMutexesHeld` 减 1。但它只有在 `uxMutexesHeld == 0` 时，才把 L 的当前优先级恢复到 `uxBasePriority` 并将 L 放回对应优先级就绪列表。
+
+## 5.5 一个任务持有多个互斥量时的继承与限制
+
+假设 L 同时持有互斥量 A、B，H 正等待 A，于是 L 继承 H 的优先级。FreeRTOS 通过 `uxMutexesHeld` 只维护“持有总数”，不为每个互斥量在 TCB 中建立一张完整的等待优先级表。
+
+因此，当 L 先释放 A 时：
+
+```text
+L.uxMutexesHeld：2 → 1
+L 仍持有 B
+→ xTaskPriorityDisinherit() 不立刻恢复 L.uxBasePriority
+→ L 保持已继承的较高优先级，直到最后一个互斥量也被释放
+```
+
+这种实现是有意的简化：它避免在每次释放一个互斥量时扫描 L 持有的所有其他互斥量及其等待者，但代价是 L 可能在已经释放 A 后，仍以较高优先级运行一段时间。
+
+等待者超时时也有对应处理：如果 H 等待 A 超时，`vTaskPriorityDisinheritAfterTimeout()` 会计算：
+
+```text
+max( L.uxBasePriority, A 的剩余等待者中的最高优先级 )
+```
+
+但源码同样只在 L 恰好只持有一个互斥量（`uxMutexesHeld == 1`）时才实际降低优先级；若 L 仍持有多个互斥量，保持当前继承优先级，防止错误地忽略其他互斥量上的高优先级等待者。
+
+> **FreeRTOS 的优先级继承解决“高优先级任务被中优先级任务无限干扰”的典型反转问题；但多互斥量场景使用的是保守的计数式简化，可能延后降级，而不是精确地逐把锁重新计算继承优先级。**
