@@ -1562,3 +1562,303 @@ max( L.uxBasePriority, A 的剩余等待者中的最高优先级 )
 但源码同样只在 L 恰好只持有一个互斥量（`uxMutexesHeld == 1`）时才实际降低优先级；若 L 仍持有多个互斥量，保持当前继承优先级，防止错误地忽略其他互斥量上的高优先级等待者。
 
 > **FreeRTOS 的优先级继承解决“高优先级任务被中优先级任务无限干扰”的典型反转问题；但多互斥量场景使用的是保守的计数式简化，可能延后降级，而不是精确地逐把锁重新计算继承优先级。**
+
+---
+
+# 6 队列集：把“哪个对象可用”也变成一条队列消息
+
+队列集用于让一个任务同时等待多个队列或信号量，而不必轮询每个对象。它解决的不是“把多个队列的数据合并”，而是“多个对象中，究竟哪一个先变为可用”。
+
+```text
+成员队列 A 保存自己的业务数据
+成员队列 B 保存自己的业务数据
+成员信号量 S 保存自己的计数
+
+队列集不保存 A/B 的业务数据，也不保存 S 的计数
+队列集只保存：哪个成员变为可用的成员句柄
+```
+
+因此，队列集本质上也是一个特殊的 `Queue_t`：其 item 不是业务数据，而是 `Queue_t *`。
+
+## 6.1 启用队列集后，`Queue_t` 多出的成员
+
+只有：
+
+```c
+configUSE_QUEUE_SETS == 1
+```
+
+时，`Queue_t` 才额外拥有：
+
+```c
+struct QueueDefinition *pxQueueSetContainer;
+```
+
+所有队列、信号量或互斥量在创建时都将它初始化为 `NULL`。当某个对象成功加入队列集后，这个字段指向所属的队列集。
+
+```text
+成员队列 A
+    pxQueueSetContainer ───→ 队列集 Set
+
+成员信号量 S
+    pxQueueSetContainer ───→ 队列集 Set
+```
+
+它是一个**反向指针**：成员知道自己属于哪个 set；队列集没有维护一条“所有成员链表”。队列集真正存储的是成员发生可用事件时写入的成员句柄。
+
+| 成员 | 作用 |
+| --- | --- |
+| 成员对象的 `pxQueueSetContainer` | 指向所属队列集；`NULL` 表示不属于任何队列集。一个成员只能属于一个队列集。 |
+| 队列集自身的 `pcHead` / `pcWriteTo` / `pcReadFrom` | 仍按普通队列工作，但数据区保存的是 `Queue_t *`，即成员句柄。 |
+| 队列集自身的 `uxItemSize` | `sizeof( Queue_t * )`，因为每条事件记录就是一个成员指针。 |
+| 队列集自身的 `uxLength` | 最多容纳多少条待处理成员事件，不是成员数量，也不是成员业务数据的容量。 |
+| 队列集自身的 `uxMessagesWaiting` | 当前尚未被 `xQueueSelectFromSet()` 取走的成员句柄数。 |
+| 队列集自身的 `xTasksWaitingToReceive` | 调用 `xQueueSelectFromSet()` 且当前没有事件时，阻塞等待的选择任务。 |
+
+## 6.2 队列集的创建与容量：创建的是“事件队列”
+
+```c
+QueueSetHandle_t xQueueCreateSet( UBaseType_t uxEventQueueLength );
+```
+
+源码本质为：
+
+```c
+xQueueGenericCreate(
+    uxEventQueueLength,
+    sizeof( Queue_t * ),
+    queueQUEUE_TYPE_SET
+);
+```
+
+所以可以直接把它理解为：
+
+```text
+普通队列：存放 application item
+队列集：  存放 Queue_t * memberHandle
+```
+
+例如 set 中有数据队列 A 和信号量 S：
+
+```text
+A 收到数据      → 队列集写入 &A
+S 被 give       → 队列集写入 &S
+
+队列集事件队列：&A → &S
+```
+
+`uxEventQueueLength` 必须能容纳可能同时积累的通知数。常用安全上界是所有成员最大可产生事件数的总和，例如两个长度分别为 3、5 的普通队列和一个计数上限为 2 的计数信号量，队列集容量至少应考虑 `3 + 5 + 2 = 10`。
+
+如果队列集已满，成员队列的数据仍可能已成功写入，但 `prvNotifyQueueSetContainer()` 无法再写入成员句柄；之后通过队列集选择就可能遗漏这次可用事件。因此容量不是自动扩展的，也不能随意取一个很小的值。
+
+## 6.3 成员加入与退出：只允许空对象改变归属
+
+### 6.3.1 加入：`xQueueAddToSet()`
+
+```c
+xQueueAddToSet( xQueueOrSemaphore, xQueueSet );
+```
+
+源码在临界区中依次检查：
+
+```text
+1. pxQueueSetContainer != NULL
+   → 已经属于其他队列集，失败
+
+2. uxMessagesWaiting != 0
+   → 当前成员非空，失败
+
+3. 两个条件都通过
+   → pxQueueSetContainer = xQueueSet
+   → 成功
+```
+
+成员必须为空，是因为非空成员本来就已经“可用”；若不补写对应事件就加入，选择者会错过它；若补写，又会让加入操作带有额外通知语义。FreeRTOS 选择更简单明确的约束：**先清空成员，再加入队列集。**
+
+### 6.3.2 退出：`xQueueRemoveFromSet()`
+
+```c
+xQueueRemoveFromSet( xQueueOrSemaphore, xQueueSet );
+```
+
+它同样要求：
+
+```text
+1. 成员的 pxQueueSetContainer 必须正好等于 xQueueSet
+2. 成员的 uxMessagesWaiting 必须为 0
+3. 成功后将 pxQueueSetContainer 置回 NULL
+```
+
+退出时也不能非空。因为队列集可能还保存着该成员此前产生的句柄事件；若直接断开归属，选择者取到旧句柄后将面对不一致状态。
+
+## 6.4 成员变为可用后：成员保存数据，队列集保存成员句柄
+
+以任务向成员队列 A 发送数据为例：
+
+```text
+1. xQueueGenericSend() 把业务 item 写入 A 的数据区
+2. A.uxMessagesWaiting 增加
+3. 发现 A.pxQueueSetContainer != NULL
+4. 调用 prvNotifyQueueSetContainer( A )
+5. 将 &A 作为一个 item 写入队列集的数据区
+6. 队列集.uxMessagesWaiting 增加
+7. 若有任务阻塞在队列集的 xTasksWaitingToReceive
+   → 唤醒其中最高优先级任务
+```
+
+`prvNotifyQueueSetContainer()` 写入的是：
+
+```c
+prvCopyDataToQueue( pxQueueSetContainer, &pxQueue, queueSEND_TO_BACK );
+```
+
+也就是说，队列集接收到的是成员 `Queue_t *`，不是成员队列刚写入的业务 item。
+
+选择者随后调用：
+
+```c
+QueueSetMemberHandle_t xMember =
+    xQueueSelectFromSet( xQueueSet, xTicksToWait );
+```
+
+该函数只是：
+
+```c
+xQueueReceive( ( QueueHandle_t ) xQueueSet, &xMember, xTicksToWait );
+```
+
+它从队列集取出一个成员句柄。接下来任务必须对返回成员再执行真正操作：
+
+```text
+返回普通队列 A → xQueueReceive( A, ... ) 取业务数据
+返回信号量 S   → xSemaphoreTake( S, ... ) 消耗信号量计数
+```
+
+```text
+生产者 → A 写入业务数据
+       → Set 写入 &A
+
+选择任务 → Set 取出 &A
+         → A 取出业务数据
+```
+
+> [!important] `xQueueSelectFromSet()` 消耗的是“成员可用通知”，不是成员本身的数据。选出成员后必须立刻对该成员 receive/take；不能把 select 当作实际收取业务数据的 API。
+
+对于长度为 1 的 overwrite 队列，若原本已有 item，再次覆盖时成员的可用状态没有从“不可用”变为“可用”，因此源码不会再向队列集插入重复通知。
+
+## 6.5 为什么队列也需要锁：锁定的是事件列表更新，不是数据收发
+
+队列集依赖成员在可用时唤醒“等待队列集”的任务；同时 ISR 也可能在任务阻塞准备阶段向成员发送/接收。因此 FreeRTOS 使用 `cTxLock`、`cRxLock` 延迟事件列表处理。
+
+这不是传统意义上“禁止读写数据”的互斥锁：队列锁定时 ISR 仍可以向队列写入或从队列读出数据。被推迟的是：**根据这次数据变化立即修改等待任务列表、立即通知队列集、立即唤醒任务的动作。**
+
+```text
+queueUNLOCKED = -1
+queueLOCKED_UNMODIFIED = 0
+
+cTxLock == -1  → 发送侧未锁定，可立即处理“有数据/有新事件”
+cTxLock == 0   → 已锁定，但锁定期间尚未发生发送
+cTxLock > 0    → 已锁定，锁定期间发生了对应次数的发送
+
+cRxLock 的含义对称：记录锁定期间发生的接收
+```
+
+### 6.5.1 上锁：`prvLockQueue()`
+
+任务准备因“队列满/空”阻塞时，典型顺序为：
+
+```text
+vTaskSuspendAll()
+    → prvLockQueue( pxQueue )
+    → 复查队列状态
+    → 将当前任务挂入事件等待列表
+    → prvUnlockQueue( pxQueue )
+    → xTaskResumeAll()
+```
+
+`prvLockQueue()` 仅在原值为 `queueUNLOCKED` 时，将 `cTxLock`、`cRxLock` 置为 `queueLOCKED_UNMODIFIED`。调度器暂停期间，任务侧不会同时修改全局就绪/延时列表；但 ISR 仍可能修改队列数据，所以不能直接让 ISR 操作事件等待列表。
+
+### 6.5.2 锁定期间的几种情况
+
+```text
+情况 1：成员队列锁定期间，ISR 发送数据
+    → 业务数据先写入成员
+    → 不立即通知队列集
+    → 成员.cTxLock 加 1，记录待处理发送事件
+
+情况 2：成员队列锁定期间，ISR 接收数据
+    → 业务数据先从成员取出
+    → 不立即唤醒等待发送者
+    → 成员.cRxLock 加 1，记录待处理接收事件
+
+情况 3：队列集自身锁定期间，成员变为可用
+    → 成员句柄先写入队列集
+    → 不立即唤醒等待 xQueueSelectFromSet() 的任务
+    → 队列集.cTxLock 加 1，记录待处理事件通知
+```
+
+第三种特别重要：队列集本身也是 `Queue_t`。`prvNotifyQueueSetContainer()` 先把成员句柄放入队列集；若队列集的 `cTxLock` 不等于 `queueUNLOCKED`，它只递增队列集的 `cTxLock`，不触碰 `xTasksWaitingToReceive`。
+
+### 6.5.3 解锁：`prvUnlockQueue()`
+
+`prvUnlockQueue()` 必须在调度器仍暂停时调用。它按照计数补做锁定期间延后的事件处理：
+
+```text
+先处理 cTxLock：
+    每有一个延后发送事件：
+        若当前 Queue_t 是某个队列集成员
+            → 调用 prvNotifyQueueSetContainer()，把成员句柄通知给队列集
+        否则
+            → 从自身 xTasksWaitingToReceive 唤醒一个等待接收者
+    完成后 cTxLock = queueUNLOCKED
+
+再处理 cRxLock：
+    每有一个延后接收事件：
+        → 从自身 xTasksWaitingToSend 唤醒一个等待发送者
+    完成后 cRxLock = queueUNLOCKED
+```
+
+如果补做通知时唤醒了更高优先级任务，因为调度器仍暂停，源码调用 `vTaskMissedYield()` 设置待切换标记；真正恢复调度后才统一进入就绪列表并决定是否切换。这保证 ISR 与任务阻塞路径不会同时破坏事件列表。
+
+## 6.6 完整调用链与适用场景
+
+典型用途是一个任务要等待“多个输入源中的任意一个”：例如同时等待命令队列、传感器采样队列和一个停止信号量。
+
+```text
+创建命令队列 CommandQ、采样队列 SampleQ、停止二值信号量 StopS
+创建队列集 Set
+将三个空成员加入 Set
+
+工作任务：
+    member = xQueueSelectFromSet( Set, portMAX_DELAY )
+
+    若 member == CommandQ：xQueueReceive( CommandQ, ... )
+    若 member == SampleQ： xQueueReceive( SampleQ, ... )
+    若 member == StopS：   xSemaphoreTake( StopS, 0 )
+```
+
+回到源码，最核心的函数关系是：
+
+```text
+xQueueCreateSet()
+    → xQueueGenericCreate(eventLength, sizeof(Queue_t *), queueQUEUE_TYPE_SET)
+
+xQueueAddToSet()
+    → 空成员的 pxQueueSetContainer = Set
+
+成员 xQueueGenericSend() / xQueueGiveFromISR()
+    → 业务数据或计数更新
+    → prvNotifyQueueSetContainer(member)
+    → Set 写入 &member
+    → 唤醒 Set.xTasksWaitingToReceive 的选择任务
+
+xQueueSelectFromSet()
+    → xQueueReceive(Set, &member, wait)
+    → 返回 member
+    → 调用者再对 member receive/take
+
+xQueueRemoveFromSet()
+    → 仅在成员为空时清空 pxQueueSetContainer
+```
+
+队列集减少的是“一个任务等待多个对象”时的轮询和手工协调代码；它并不替代成员队列本身，也不转发成员数据。成员数据、信号量计数、队列集通知这三者必须分开理解。
