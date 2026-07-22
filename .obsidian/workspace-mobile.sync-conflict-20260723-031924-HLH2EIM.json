@@ -27,12 +27,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "03_FreeRTOS机制.md",
+                "file": "-1_面试真题整理.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "03_FreeRTOS机制"
+              "title": "-1_面试真题整理"
             }
           }
         ],
@@ -127,7 +127,7 @@
         "state": {
           "type": "backlink",
           "state": {
-            "file": "0B的总结/0x00_FreeRTOS概述.md",
+            "file": "03_FreeRTOS机制.md",
             "collapseAll": false,
             "extraContext": false,
             "sortOrder": "alphabetical",
@@ -181,33 +181,33 @@
       "bases:新建数据库": false
     }
   },
-  "active": "e408e7752153aaec",
+  "active": "afb405667b62ebb0",
   "lastOpenFiles": [
-    "0B的总结/0x00_FreeRTOS概述.md",
-    "06_HardFault.md",
-    "03_FreeRTOS机制.md",
+    "02_IMU与融合解算.md",
+    "01_FOC矢量驱动.md",
+    "07_GDB调试与编译.md",
+    "06_HardFault异常.md",
+    "05_内存分布与启动流程.md",
+    "模板/项目复盘模板.md",
     "00_面试总览.md",
-    "模板/0x01_FreeRTOS概述.md",
-    "08_C、C++八股.md",
-    "模板/面试题模板.md",
-    "附件/Pasted image 20260605142738.png",
-    "附件/求职进度截图_20260629.png",
+    "附件/Pasted image 20260706222139.png",
     "附件/Pasted image 20260706234752.png",
+    "03_FreeRTOS机制.md",
     "附件/Pasted image 20260605145120.png",
     "01_FOC.md",
     "电流环.md",
     "01 FOC.md",
     "未命名.canvas",
-    "05_内存分布与启动流程.md",
     "04_Cortex-M 寄存器.md",
     "08 GDB调试.md",
     "04_PC_LR_SP.md",
     "05_内存分布.md",
     "09 C、C++八股.md",
     "02_imu解算.md",
+    "模板/面试题模板.md",
     "模板/日记模板.md",
-    "模板/项目复盘模板.md",
     "模板",
+    "附件/求职进度截图_20260629.png",
     "附件/求职经历.xlsx",
     "07 单片机启动流程.md",
     "06 HardFault.md",
