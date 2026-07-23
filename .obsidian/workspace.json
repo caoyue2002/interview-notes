@@ -8,31 +8,17 @@
         "type": "tabs",
         "children": [
           {
-            "id": "c1a93aa1ae346fa8",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "-1_面试真题整理（0B补充）.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "-1_面试真题整理（0B补充）"
-            }
-          },
-          {
             "id": "db9d7323290f1b2b",
             "type": "leaf",
             "state": {
               "type": "markdown",
               "state": {
-                "file": "-1_面试真题整理（自写答案）.md",
+                "file": "Tiebreaker_项目架构与面试讲解.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "-1_面试真题整理（自写答案）"
+              "title": "Tiebreaker_项目架构与面试讲解"
             }
           },
           {
@@ -41,12 +27,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "RX101_任务说明.md",
+                "file": "SuperCap2023_项目架构与面试讲解.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "RX101_任务说明"
+              "title": "SuperCap2023_项目架构与面试讲解"
             }
           }
         ]
@@ -81,13 +67,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "-1_面试真题整理（0B补充）.md",
+                "file": "Tiebreaker_项目架构与面试讲解.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "-1_面试真题整理（0B补充） 的大纲"
+              "title": "Tiebreaker_项目架构与面试讲解 的大纲"
             }
           },
           {
@@ -117,8 +103,7 @@
               "title": "书签"
             }
           }
-        ],
-        "currentTab": 1
+        ]
       }
     ],
     "direction": "horizontal",
@@ -213,17 +198,21 @@
       "bases:新建数据库": false
     }
   },
-  "active": "c1a93aa1ae346fa8",
+  "active": "db9d7323290f1b2b",
   "lastOpenFiles": [
+    "Tiebreaker_架构图.svg",
+    "SuperCap2023_架构图.svg",
+    "RX101_任务说明.md",
     "-1_面试真题整理（自写答案）.md",
+    "SuperCap2023_项目架构与面试讲解.md",
+    "Tiebreaker_项目架构与面试讲解.md",
+    "未命名.base",
     "-1_面试真题整理（0B补充）.md",
     "06_HardFault.sync-conflict-20260723-031929-3H75LBK.md",
     "~syncthing~06_HardFault.sync-conflict-20260723-031929-3H75LBK.md.tmp",
     "模板/~syncthing~面试题模板.md.tmp",
-    "RX101_任务说明.md",
     "0B的总结/0x00_FreeRTOS概述.md",
     "-1_面试真题整理（GPT总结答案）.md",
-    "未命名.base",
     "附件/Pasted image 20260715160000.png",
     "附件/Pasted image 20260712160000.png",
     "11_数据结构.md",
@@ -246,17 +235,12 @@
     "04_Cortex-M 寄存器.md",
     "06_HardFault.md",
     "09_通信协议.md",
-    "08_C、C++八股.md",
     "附件/Pasted image 20260711160000.png",
     "附件/Pasted image 20260711154000.png",
     "附件/Pasted image 20260711153000.png",
     "附件/Pasted image 20260706234752.png",
-    "05_内存分布与启动流程.md",
-    "ss.md",
     "附件/Pasted image 20260707134011.png",
     "~$面试总览.xlsx",
-    "面试总览_截图预览_最终预览.png",
-    "面试总览_秋招概况_最终预览.png",
     "面试总览.xlsx.inspect.ndjson",
     "面试总览.xlsx",
     "附件/求职经历.xlsx",
