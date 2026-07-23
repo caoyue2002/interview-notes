@@ -6,5 +6,6 @@
   "interfaceFontFamily": "",
   "monospaceFontFamily": "JetBrains Mono",
   "translucency": false,
-  "accentColor": "#7b748b"
+  "accentColor": "#7b748b",
+  "baseFontSize": 19
 }
